@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Custom Maps App</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet-control-geocoder/dist/Control.Geocoder.css" />
+  <style>
+    body, html { margin: 0; padding: 0; height: 100%; }
+    #map { height: 100%; }
+    #sidebar {
+      position: absolute;
+      top: 0; left: 0;
+      width: 300px;
+      height: 100%;
+      background: white;
+      padding: 15px;
+      overflow-y: auto;
+      z-index: 1000;
+      box-shadow: 2px 0 5px rgba(0,0,0,0.3);
+    }
+    .input-group { margin-bottom: 10px; }
+    .input-group input, .input-group select, .input-group button {
+      width: 100%;
+      padding: 8px;
+      margin-top: 5px;
+    }
+  </style>
+</head>
+<body>
+<div id="sidebar">
+  <h2>Custom Maps</h2>
+
+  <div class="input-group">
+    <label>Route Finder</label>
+    <select id="fromOption">
+      <option value="live">From: Live Location</option>
+      <option value="custom">From: Custom</option>
+    </select>
+    <input id="fromInput" placeholder="From (lat,lon)" />
+
+    <select id="toOption">
+      <option value="custom">To: Custom</option>
+      <option value="live">To: Live Location</option>
+    </select>
+    <input id="toInput" placeholder="To (lat,lon)" />
+
+    <select id="vehicle">
+      <option value="foot-walking">Walking</option>
+      <option value="cycling-regular">Bicycle</option>
+      <option value="driving-car">Car</option>
+      <option value="driving-hgv">Motorbike</option>
+    </select>
+
+    <button onclick="routeSearch()">Find Route</button>
+    <div id="timeEstimate"></div>
+  </div>
+
+  <hr>
+  <div class="input-group">
+    <label>Add New Place</label>
+    <input id="placeName" placeholder="Place Name">
+    <select id="placeType">
+      <option value="building">Building</option>
+      <option value="hospital">Hospital</option>
+      <option value="park">Park</option>
+    </select>
+    <button onclick="enableAddMode()">Enable Add Mode</button>
+  </div>
+
+  <hr>
+  <div class="input-group">
+    <button onclick="toggleSatellite()">Toggle Satellite View</button>
+  </div>
+</div>
+
+<div id="map"></div>
+
+<script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet-control-geocoder/dist/Control.Geocoder.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-firestore-compat.js"></script>
+
+<script>
+  const firebaseConfig = {
+    apiKey: "DUMMY_KEY",
+    authDomain: "yourapp.firebaseapp.com",
+    projectId: "yourapp-id",
+    storageBucket: "yourapp.appspot.com",
+    messagingSenderId: "000000000000",
+    appId: "1:000000000000:web:abcdef123456"
+  };
+  firebase.initializeApp(firebaseConfig);
+  const db = firebase.firestore();
+
+  let map = L.map('map').setView([20.59, 78.96], 5);
+  let osm = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png');
+  let satellite = L.tileLayer('https://{s}.google.com/vt/lyrs=s&x={x}&y={y}&z={z}', {
+    subdomains:['mt0','mt1','mt2','mt3']
+  });
+  osm.addTo(map);
+  let isSatellite = false;
+
+  function toggleSatellite() {
+    if (isSatellite) {
+      map.removeLayer(satellite);
+      osm.addTo(map);
+    } else {
+      map.removeLayer(osm);
+      satellite.addTo(map);
+    }
+    isSatellite = !isSatellite;
+  }
+
+  let liveMarker;
+  navigator.geolocation.watchPosition(pos => {
+    let latlng = [pos.coords.latitude, pos.coords.longitude];
+    if (!liveMarker) {
+      liveMarker = L.marker(latlng).addTo(map).bindPopup("You are here").openPopup();
+      map.setView(latlng, 15);
+    } else {
+      liveMarker.setLatLng(latlng);
+    }
+  });
+
+  let addMode = false;
+  function enableAddMode() {
+    addMode = true;
+    alert("Click on the map to add the place.");
+  }
+
+  map.on('click', async function(e) {
+    if (addMode) {
+      const name = document.getElementById('placeName').value;
+      const type = document.getElementById('placeType').value;
+      const icons = {
+        building: "🏢",
+        hospital: "🏥",
+        park: "🌳"
+      };
+      const marker = L.marker(e.latlng).addTo(map)
+        .bindPopup(`<b>${icons[type]} ${name}</b><br>Type: ${type}`).openPopup();
+      await db.collection("places").add({
+        name: name,
+        type: type,
+        lat: e.latlng.lat,
+        lng: e.latlng.lng
+      });
+      addMode = false;
+    }
+  });
+
+  async function loadPlaces() {
+    const snap = await db.collection("places").get();
+    snap.forEach(doc => {
+      const data = doc.data();
+      const icons = {
+        building: "🏢",
+        hospital: "🏥",
+        park: "🌳"
+      };
+      L.marker([data.lat, data.lng])
+        .addTo(map)
+        .bindPopup(`<b>${icons[data.type]} ${data.name}</b><br>Type: ${data.type}`);
+    });
+  }
+  loadPlaces();
+
+  let routeLayer;
+  async function routeSearch() {
+    const fromType = document.getElementById('fromOption').value;
+    const toType = document.getElementById('toOption').value;
+    const vehicle = document.getElementById('vehicle').value;
+
+    let fromCoords, toCoords;
+
+    if (fromType === 'live') {
+      fromCoords = [liveMarker.getLatLng().lng, liveMarker.getLatLng().lat];
+    } else {
+      let parts = document.getElementById('fromInput').value.split(',');
+      fromCoords = [parseFloat(parts[1]), parseFloat(parts[0])];
+    }
+
+    if (toType === 'live') {
+      toCoords = [liveMarker.getLatLng().lng, liveMarker.getLatLng().lat];
+    } else {
+      let parts = document.getElementById('toInput').value.split(',');
+      toCoords = [parseFloat(parts[1]), parseFloat(parts[0])];
+    }
+
+    const res = await fetch(`https://api.openrouteservice.org/v2/directions/${vehicle}/geojson`, {
+      method: 'POST',
+      headers: {
+        'Authorization': 'YOUR_ORS_API_KEY',
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ coordinates: [fromCoords, toCoords] })
+    });
+    const data = await res.json();
+
+    if (routeLayer) map.removeLayer(routeLayer);
+    routeLayer = L.geoJSON(data).addTo(map);
+
+    const duration = data.features[0].properties.summary.duration / 60;
+    document.getElementById("timeEstimate").innerText = `Approx time: ${duration.toFixed(2)} minutes`;
+  }
+</script>
+</body>
+</html>
